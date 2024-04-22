@@ -2,11 +2,39 @@ use clap::{arg, command, Command};
 use glob::glob;
 use std::{error::Error, fs, io, os::unix::fs::MetadataExt};
 
-struct SourceCounter<'a> {
-    path: &'a str,
+struct SourceCounter {
+    path: String,
     inode: u64,
-    num_other_links: u64,
+    num_other_links: usize,
     paths_other_links: Vec<String>,
+}
+
+impl SourceCounter {
+    fn new(path: String, inode: u64, num_other_links: usize) -> Self {
+        SourceCounter {
+            path,
+            inode,
+            num_other_links,
+            paths_other_links: vec![],
+        }
+    }
+
+    fn new_by_stat(path: String, stat: &fs::Metadata) -> Self {
+        SourceCounter {
+            path,
+            inode: stat.ino(),
+            num_other_links: stat.nlink() as usize,
+            paths_other_links: vec![],
+        }
+    }
+
+    fn get_remaning_other_links(&self) -> usize {
+        self.num_other_links - self.paths_other_links.len()
+    }
+
+    fn add_path_other_link(&mut self, path: String) {
+        self.paths_other_links.push(path);
+    }
 }
 
 fn cli() -> Command {
@@ -14,6 +42,29 @@ fn cli() -> Command {
         .arg(arg!(<search> "A glob pattern for where to search for the links"))
         .arg(arg!(<source> ... "The source file or directory to copy."))
         .arg(arg!(<destination> "The destination file or directory to copy to."))
+}
+
+fn create_source_counters_from_source_files<'a>(
+    source_files: impl Iterator<Item = &'a str>,
+) -> Result<Vec<SourceCounter>, Box<dyn Error>> {
+    let mut source_counters = Vec::<SourceCounter>::with_capacity(source_files.size_hint().0);
+    for source_file in source_files {
+        let metadata_result = fs::metadata(source_file);
+        if let Err(err) = metadata_result {
+            // return Err(Box::new(err));
+            panic!("Error: {}", err);
+        }
+        let metadata = metadata_result.unwrap();
+
+        if (!metadata.is_file()) {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Only files are supported at the moment",
+            )));
+        }
+    }
+
+    Ok(vec![])
 }
 
 fn stat_source_files(source_files: Vec<&str>) -> Result<(), Box<dyn Error>> {
