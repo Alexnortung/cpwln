@@ -1,16 +1,22 @@
 use clap::{arg, command, Command};
 use glob::glob;
-use std::{error::Error, fs, io, os::unix::fs::MetadataExt};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fs::{self, Metadata},
+    io,
+    os::unix::fs::{symlink, MetadataExt},
+};
 
 struct SourceCounter {
     path: String,
     inode: u64,
-    num_other_links: usize,
+    num_other_links: u64,
     paths_other_links: Vec<String>,
 }
 
 impl SourceCounter {
-    fn new(path: String, inode: u64, num_other_links: usize) -> Self {
+    fn new(path: String, inode: u64, num_other_links: u64) -> Self {
         SourceCounter {
             path,
             inode,
@@ -23,17 +29,21 @@ impl SourceCounter {
         SourceCounter {
             path,
             inode: stat.ino(),
-            num_other_links: stat.nlink() as usize,
+            num_other_links: stat.nlink(),
             paths_other_links: vec![],
         }
     }
 
-    fn get_remaning_other_links(&self) -> usize {
-        self.num_other_links - self.paths_other_links.len()
+    fn get_remaning_other_links(&self) -> u64 {
+        self.num_other_links - self.paths_other_links.len() as u64
     }
 
     fn add_path_other_link(&mut self, path: String) {
         self.paths_other_links.push(path);
+    }
+
+    fn is_all_links_found(&self) -> bool {
+        self.get_remaning_other_links() == 0
     }
 }
 
@@ -56,7 +66,7 @@ fn create_source_counters_from_source_files<'a>(
         }
         let metadata = metadata_result.unwrap();
 
-        if (!metadata.is_file()) {
+        if !metadata.is_file() {
             return Err(Box::new(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Only files are supported at the moment",
@@ -86,6 +96,57 @@ fn stat_source_files(source_files: Vec<&str>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn search_and_count(
+    search: &str,
+    mut counters: HashMap<u64, SourceCounter>,
+) -> Result<HashMap<u64, SourceCounter>, Box<dyn Error>> {
+    for entry in glob(search).expect("Failed to read glob pattern") {
+        match entry {
+            Ok(entry) => {
+                let metadata = entry.metadata();
+                match metadata {
+                    Ok(metadata) => {
+                        let inode = metadata.ino();
+
+                        if let Some(counter) = counters.get_mut(&inode) {
+                            counter.add_path_other_link(entry.to_string_lossy().to_string());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(Box::new(e));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(Box::new(e));
+            }
+        }
+    }
+
+    Ok(counters)
+}
+
+fn move_counter(source: SourceCounter, destination: &str) -> Result<(), Box<dyn Error>> {
+    let copy_result = fs::copy(source.path.as_str(), destination);
+    if let Err(err) = copy_result {
+        return Err(Box::new(err));
+    }
+    let remove_result = fs::remove_file(source.path.as_str());
+    if let Err(err) = remove_result {
+        return Err(Box::new(err));
+    }
+    // FIXME: Make work cross platform
+    symlink(destination, source.path.as_str());
+
+    for path in source.paths_other_links.iter() {
+        fs::remove_file(path);
+        // FIXME: Make work cross platform
+        symlink(destination, path);
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = cli().get_matches_from(wild::args());
 
@@ -106,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stat source files
     // And check if the "file" is a directory, if it is a directory, it is not support for now
     // let source_files: Vec<_> = source.map(|s| (s, fs::metadata(s))).collect();
-    let source_files = source
+    let source_files: Vec<Result<(&String, Metadata), _>> = source
         .map(|s| {
             let metadata = fs::metadata(s).expect("Failed to read metadata");
             if metadata.is_dir() {
@@ -114,9 +175,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("Directories are not supported yet.");
             }
 
-            metadata
+            if !metadata.is_file() {
+                return Err("Only files are supported at the moment");
+            }
+
+            Ok((s, metadata))
         })
+        // .filter_map(|x| if x.is_ok() { Some(x.unwrap()) } else { None })
         .collect();
+
+    if let Some(err) = source_files.iter().find(|x| x.is_err()) {
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::Other,
+            err.to_owned().unwrap_err(),
+        )));
+    }
+
+    let source_files_unwrapped: Vec<&(&String, Metadata)> =
+        source_files.iter().map(|x| x.as_ref().unwrap()).collect();
 
     // println!("Source files: {:?}", source_files.first().unwrap().ino());
     // println!("Source files: {:?}", source_files.first().unwrap().nlink());
@@ -132,10 +208,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     println!("Num other links: {:?}", num_other_links);
     // }
 
-    let xd = source_files.iter().map(|s| {
+    let counters = source_files_unwrapped.iter().map(|(path, s)| {
         let inode = s.ino();
         let num_other_links = s.nlink();
-        let path = s.path().to_str().unwrap();
+        let path = path.to_string();
 
         SourceCounter {
             path,
@@ -145,38 +221,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    for entry in glob(search).expect("Failed to read glob pattern") {
-        // if let Err(entry) = entry {
-        //     println!("Error: {}", entry.into_error().to_string());
-        //
-        //     // return error
-        //     return Err(Box::new(entry.into_error()));
-        // }
-        // let metadata = entry?.metadata()?;
+    let counter_map = counters
+        .map(|c| (c.inode, c))
+        .collect::<std::collections::HashMap<u64, SourceCounter>>();
 
-        match entry {
-            Ok(entry) => {
-                let metadata = entry.metadata()?;
-                let inode = metadata.ino();
-                let num_other_links = metadata.nlink();
-                let path = entry.display().to_string();
+    let updated_counters = search_and_count(search, counter_map)?;
 
-                println!("Path: {:?}", path);
-                println!("Inode: {:?}", inode);
-                println!("Num other links: {:?}", num_other_links);
+    if updated_counters
+        .iter()
+        .any(|(_, c)| !c.is_all_links_found())
+    {
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::Other,
+            "Not all links were found, try a broader search",
+        )));
+    }
 
-                // Check if the inode is in the source files
-                if source_files.iter().any(|s| s.ino() == inode) {
-                    println!("Found source file: {:?}", path);
-                } else {
-                    println!("Found other link: {:?}", path);
-                }
-            }
-            Err(e) => {
-                // println!("Error: {}", e.to_string());
-                return Err(Box::new(e));
-            }
-        }
+    for (_, counter) in updated_counters.into_iter() {
+        move_counter(counter, destination)?;
     }
 
     Ok(())
