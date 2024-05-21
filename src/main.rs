@@ -1,11 +1,13 @@
 use clap::{arg, command, Command};
 use glob::glob;
+use relative_path::RelativePath;
 use std::{
     collections::HashMap,
     error::Error,
     fs::{self, Metadata},
     io,
     os::unix::fs::{symlink, MetadataExt},
+    path,
 };
 
 struct SourceCounter {
@@ -39,6 +41,11 @@ impl SourceCounter {
     }
 
     fn add_path_other_link(&mut self, path: String) {
+        if self.paths_other_links.contains(&path) {
+            return;
+        } else if self.path == path {
+            return;
+        }
         self.paths_other_links.push(path);
     }
 
@@ -88,9 +95,9 @@ fn stat_source_files(source_files: Vec<&str>) -> Result<(), Box<dyn Error>> {
         let inode = metadata.ino();
         let num_other_links = metadata.nlink();
 
-        println!("Source file: {:?}", source_file);
-        println!("Inode: {:?}", inode);
-        println!("Num other links: {:?}", num_other_links);
+        // println!("Source file: {:?}", source_file);
+        // println!("Inode: {:?}", inode);
+        // println!("Num other links: {:?}", num_other_links);
     }
 
     Ok(())
@@ -100,7 +107,9 @@ fn search_and_count(
     search: &str,
     mut counters: HashMap<u64, SourceCounter>,
 ) -> Result<HashMap<u64, SourceCounter>, Box<dyn Error>> {
+    // println!("Search: {:?}", search);
     for entry in glob(search).expect("Failed to read glob pattern") {
+        // println!("Entry: {:?}", entry);
         match entry {
             Ok(entry) => {
                 let metadata = entry.metadata();
@@ -135,13 +144,48 @@ fn move_counter(source: SourceCounter, destination: &str) -> Result<(), Box<dyn 
     if let Err(err) = remove_result {
         return Err(Box::new(err));
     }
+    // let relative_path_option = pathdiff::diff_paths(source.path.as_str(), destination);
+    // if relative_path_option.is_none() {
+    //     return Err(Box::new(io::Error::new(
+    //         io::ErrorKind::Other,
+    //         "Failed to get relative path",
+    //     )));
+    // }
+    // let relative_path = relative_path_option.unwrap();
+    // println!(
+    //     "Relative path: {:?} - source: {:?} - destination: {:?}",
+    //     relative_path,
+    //     source.path.as_str(),
+    //     destination
+    // );
+
+    let relative_destination = RelativePath::new(destination);
+    let relative_source = RelativePath::new(source.path.as_str());
+    let relative_source_dir = relative_source.parent().unwrap();
+
+    let relative_path_object = relative_source_dir.relative(relative_destination);
+    let relative_path = relative_path_object.to_string();
+
     // FIXME: Make work cross platform
-    symlink(destination, source.path.as_str());
+    let symlink_result = symlink(relative_path, source.path.as_str());
+    if let Err(err) = symlink_result {
+        return Err(Box::new(err));
+    }
 
     for path in source.paths_other_links.iter() {
-        fs::remove_file(path);
+        if let Err(err) = fs::remove_file(path) {
+            return Err(Box::new(err));
+        }
+
+        let relative_source = RelativePath::new(path);
+        let relative_source_dir = relative_source.parent().unwrap();
+        let relative_path_object = relative_source_dir.relative(relative_destination);
+        let relative_path = relative_path_object.to_string();
+
         // FIXME: Make work cross platform
-        symlink(destination, path);
+        if let Err(err) = symlink(relative_path, path) {
+            return Err(Box::new(err));
+        }
     }
 
     Ok(())
@@ -210,8 +254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let counters = source_files_unwrapped.iter().map(|(path, s)| {
         let inode = s.ino();
-        let num_other_links = s.nlink();
+        // The file itself is also a links, so to find other links, we need to subtract one
+        let num_other_links = s.nlink() - 1;
         let path = path.to_string();
+
+        // println!("Source file: {:?}. links: {}", path, num_other_links);
 
         SourceCounter {
             path,
