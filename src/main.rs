@@ -135,57 +135,84 @@ fn search_and_count(
     Ok(counters)
 }
 
+/// Replaces destination file with a symlink to the source file
+/// If the destination is a directory, it will symlink the source file into the directory
+fn replace_with_symlink(source: &str, destination: &str) -> Result<(), std::io::Error> {
+    // If the destination is a directory
+    let destination_metadata = fs::metadata(destination)?;
+
+    let relative_source = RelativePath::new(source);
+
+    if destination_metadata.is_dir() {
+        // println!("Destination is a directory: {:?}", destination);
+        let relative_destination_dir = RelativePath::new(destination);
+        let relative_destination =
+            relative_destination_dir.join(relative_source.file_name().unwrap());
+
+        let relative_path_object = relative_destination_dir.relative(relative_source);
+        let relative_path = relative_path_object.to_string();
+        let destination = relative_destination.to_string();
+
+        // FIXME: Make work cross platform
+        return symlink(relative_path, destination);
+    }
+
+    fs::remove_file(destination)?;
+
+    let relative_destination = RelativePath::new(destination);
+    let relative_destination_dir = relative_destination.parent().unwrap();
+
+    let relative_path_object = relative_destination_dir.relative(relative_source);
+    let relative_path = relative_path_object.to_string();
+    let destination = relative_destination.to_string();
+
+    // FIXME: Make work cross platform
+    symlink(relative_path, destination)
+}
+
 fn move_counter(source: SourceCounter, destination: &str) -> Result<(), Box<dyn Error>> {
-    let copy_result = fs::copy(source.path.as_str(), destination);
+    let destination_file_path = match fs::metadata(destination) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                let destination_dir_str = destination;
+                let relative_source = RelativePath::new(&source.path);
+                let destination = RelativePath::new(destination_dir_str)
+                    .join(relative_source.file_name().unwrap());
+                destination.to_string()
+            } else {
+                destination.to_string()
+            }
+        }
+        Err(_) => destination.to_string(),
+    };
+    let destination_str = destination_file_path.as_str();
+    let copy_result = fs::copy(source.path.as_str(), destination_str);
     if let Err(err) = copy_result {
         return Err(Box::new(err));
     }
-    let remove_result = fs::remove_file(source.path.as_str());
-    if let Err(err) = remove_result {
-        return Err(Box::new(err));
-    }
-    // let relative_path_option = pathdiff::diff_paths(source.path.as_str(), destination);
-    // if relative_path_option.is_none() {
-    //     return Err(Box::new(io::Error::new(
-    //         io::ErrorKind::Other,
-    //         "Failed to get relative path",
-    //     )));
-    // }
-    // let relative_path = relative_path_option.unwrap();
-    // println!(
-    //     "Relative path: {:?} - source: {:?} - destination: {:?}",
-    //     relative_path,
-    //     source.path.as_str(),
-    //     destination
-    // );
 
-    let relative_destination = RelativePath::new(destination);
-    let relative_source = RelativePath::new(source.path.as_str());
-    let relative_source_dir = relative_source.parent().unwrap();
-
-    let relative_path_object = relative_source_dir.relative(relative_destination);
-    let relative_path = relative_path_object.to_string();
-
-    // FIXME: Make work cross platform
-    let symlink_result = symlink(relative_path, source.path.as_str());
-    if let Err(err) = symlink_result {
-        return Err(Box::new(err));
-    }
+    replace_with_symlink(destination_str, source.path.as_str())?;
 
     for path in source.paths_other_links.iter() {
-        if let Err(err) = fs::remove_file(path) {
-            return Err(Box::new(err));
-        }
+        replace_with_symlink(&destination_str, path.as_str())?;
+    }
 
-        let relative_source = RelativePath::new(path);
-        let relative_source_dir = relative_source.parent().unwrap();
-        let relative_path_object = relative_source_dir.relative(relative_destination);
-        let relative_path = relative_path_object.to_string();
+    Ok(())
+}
 
-        // FIXME: Make work cross platform
-        if let Err(err) = symlink(relative_path, path) {
-            return Err(Box::new(err));
-        }
+fn ensure_dir(path: &str) -> Result<(), Box<dyn Error>> {
+    let metadata_option = fs::metadata(path);
+    if metadata_option.is_err() {
+        fs::create_dir_all(path)?;
+
+        return Ok(());
+    }
+
+    let metadata = metadata_option.unwrap();
+
+    if !metadata.is_dir() {
+        fs::remove_file(path)?;
+        fs::create_dir_all(path)?;
     }
 
     Ok(())
@@ -268,6 +295,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let is_multiple_sources = source_files_unwrapped.len() > 1;
+
     let counter_map = counters
         .map(|c| (c.inode, c))
         .collect::<std::collections::HashMap<u64, SourceCounter>>();
@@ -282,6 +311,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             io::ErrorKind::Other,
             "Not all links were found, try a broader search",
         )));
+    }
+
+    if is_multiple_sources {
+        ensure_dir(destination)?;
     }
 
     for (_, counter) in updated_counters.into_iter() {
