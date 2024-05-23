@@ -58,32 +58,19 @@ fn cli() -> Command {
         .arg(arg!(<destination> "The destination file or directory to copy to."))
 }
 
+type INodeCounterMap = HashMap<u64, SourceCounter>;
+
 fn search_and_count(
     search: &str,
-    mut counters: HashMap<u64, SourceCounter>,
-) -> Result<HashMap<u64, SourceCounter>, Box<dyn Error>> {
-    // println!("Search: {:?}", search);
+    mut counters: INodeCounterMap,
+) -> Result<INodeCounterMap, Box<dyn Error>> {
     for entry in glob(search).expect("Failed to read glob pattern") {
-        // println!("Entry: {:?}", entry);
-        match entry {
-            Ok(entry) => {
-                let metadata = entry.metadata();
-                match metadata {
-                    Ok(metadata) => {
-                        let inode = metadata.ino();
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let inode = metadata.ino();
 
-                        if let Some(counter) = counters.get_mut(&inode) {
-                            counter.add_path_other_link(entry.to_string_lossy().to_string());
-                        }
-                    }
-                    Err(e) => {
-                        return Err(Box::new(e));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(Box::new(e));
-            }
+        if let Some(counter) = counters.get_mut(&inode) {
+            counter.add_path_other_link(entry.to_string_lossy().to_string());
         }
     }
 
