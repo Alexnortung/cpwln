@@ -58,48 +58,6 @@ fn cli() -> Command {
         .arg(arg!(<destination> "The destination file or directory to copy to."))
 }
 
-// fn create_source_counters_from_source_files<'a>(
-//     source_files: impl Iterator<Item = &'a str>,
-// ) -> Result<Vec<SourceCounter>, Box<dyn Error>> {
-//     // let mut source_counters = Vec::<SourceCounter>::with_capacity(source_files.size_hint().0);
-//     for source_file in source_files {
-//         let metadata_result = fs::metadata(source_file);
-//         if let Err(err) = metadata_result {
-//             // return Err(Box::new(err));
-//             panic!("Error: {}", err);
-//         }
-//         let metadata = metadata_result.unwrap();
-//
-//         if !metadata.is_file() {
-//             return Err(Box::new(io::Error::new(
-//                 io::ErrorKind::InvalidInput,
-//                 "Only files are supported at the moment",
-//             )));
-//         }
-//     }
-//
-//     Ok(vec![])
-// }
-
-// fn stat_source_files(source_files: Vec<&str>) -> Result<(), Box<dyn Error>> {
-//     for source_file in source_files.iter() {
-//         let metadata_result = fs::metadata(source_file);
-//         // if metadata_result.is_err() {
-//         if let Err(err) = metadata_result {
-//             return Err(Box::new(err));
-//         }
-//         let metadata = metadata_result.unwrap();
-//         let inode = metadata.ino();
-//         let num_other_links = metadata.nlink();
-//
-//         // println!("Source file: {:?}", source_file);
-//         // println!("Inode: {:?}", inode);
-//         // println!("Num other links: {:?}", num_other_links);
-//     }
-//
-//     Ok(())
-// }
-
 fn search_and_count(
     search: &str,
     mut counters: HashMap<u64, SourceCounter>,
@@ -141,7 +99,6 @@ fn replace_with_symlink(source: &str, destination: &str) -> Result<(), std::io::
     let relative_source = RelativePath::new(source);
 
     if destination_metadata.is_dir() {
-        // println!("Destination is a directory: {:?}", destination);
         let relative_destination_dir = RelativePath::new(destination);
         let relative_destination =
             relative_destination_dir.join(relative_source.file_name().unwrap());
@@ -229,13 +186,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_one::<String>("destination")
         .expect("No destination provided.");
 
-    // println!("Search: {:?}", search);
-    // println!("Source: {:?}", source.clone().collect::<Vec<_>>());
-    // println!("Destination: {:?}", destination);
-
     // Stat source files
     // And check if the "file" is a directory, if it is a directory, it is not support for now
-    // let source_files: Vec<_> = source.map(|s| (s, fs::metadata(s))).collect();
     let source_files: Vec<Result<(&String, Metadata), _>> = source
         .map(|s| {
             let metadata = fs::metadata(s).expect("Failed to read metadata");
@@ -250,7 +202,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok((s, metadata))
         })
-        // .filter_map(|x| if x.is_ok() { Some(x.unwrap()) } else { None })
         .collect();
 
     if let Some(err) = source_files.iter().find(|x| x.is_err()) {
@@ -263,27 +214,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_files_unwrapped: Vec<&(&String, Metadata)> =
         source_files.iter().map(|x| x.as_ref().unwrap()).collect();
 
-    // println!("Source files: {:?}", source_files.first().unwrap().ino());
-    // println!("Source files: {:?}", source_files.first().unwrap().nlink());
-    // println!("Source files: {:?}", source_files.first().unwrap().dev());
-
-    // for source_file in source_files.iter() {
-    //     let inode = source_file.ino();
-    //     let num_other_links = source_file.nlink();
-    //     let path = source_file.path().to_str().unwrap();
-    //
-    //     println!("Source file: {:?}", path);
-    //     println!("Inode: {:?}", inode);
-    //     println!("Num other links: {:?}", num_other_links);
-    // }
-
     let counters = source_files_unwrapped.iter().map(|(path, s)| {
         let inode = s.ino();
         // The file itself is also a links, so to find other links, we need to subtract one
         let num_other_links = s.nlink() - 1;
         let path = (*path).to_string();
-
-        // println!("Source file: {:?}. links: {}", path, num_other_links);
 
         SourceCounter {
             path,
