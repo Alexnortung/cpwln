@@ -7,7 +7,6 @@ use std::{
     fs::{self, Metadata},
     io,
     os::unix::fs::{symlink, MetadataExt},
-    path,
 };
 
 struct SourceCounter {
@@ -41,9 +40,7 @@ impl SourceCounter {
     }
 
     fn add_path_other_link(&mut self, path: String) {
-        if self.paths_other_links.contains(&path) {
-            return;
-        } else if self.path == path {
+        if self.paths_other_links.contains(&path) || self.path == path {
             return;
         }
         self.paths_other_links.push(path);
@@ -61,47 +58,47 @@ fn cli() -> Command {
         .arg(arg!(<destination> "The destination file or directory to copy to."))
 }
 
-fn create_source_counters_from_source_files<'a>(
-    source_files: impl Iterator<Item = &'a str>,
-) -> Result<Vec<SourceCounter>, Box<dyn Error>> {
-    let mut source_counters = Vec::<SourceCounter>::with_capacity(source_files.size_hint().0);
-    for source_file in source_files {
-        let metadata_result = fs::metadata(source_file);
-        if let Err(err) = metadata_result {
-            // return Err(Box::new(err));
-            panic!("Error: {}", err);
-        }
-        let metadata = metadata_result.unwrap();
+// fn create_source_counters_from_source_files<'a>(
+//     source_files: impl Iterator<Item = &'a str>,
+// ) -> Result<Vec<SourceCounter>, Box<dyn Error>> {
+//     // let mut source_counters = Vec::<SourceCounter>::with_capacity(source_files.size_hint().0);
+//     for source_file in source_files {
+//         let metadata_result = fs::metadata(source_file);
+//         if let Err(err) = metadata_result {
+//             // return Err(Box::new(err));
+//             panic!("Error: {}", err);
+//         }
+//         let metadata = metadata_result.unwrap();
+//
+//         if !metadata.is_file() {
+//             return Err(Box::new(io::Error::new(
+//                 io::ErrorKind::InvalidInput,
+//                 "Only files are supported at the moment",
+//             )));
+//         }
+//     }
+//
+//     Ok(vec![])
+// }
 
-        if !metadata.is_file() {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Only files are supported at the moment",
-            )));
-        }
-    }
-
-    Ok(vec![])
-}
-
-fn stat_source_files(source_files: Vec<&str>) -> Result<(), Box<dyn Error>> {
-    for source_file in source_files.iter() {
-        let metadata_result = fs::metadata(source_file);
-        // if metadata_result.is_err() {
-        if let Err(err) = metadata_result {
-            return Err(Box::new(err));
-        }
-        let metadata = metadata_result.unwrap();
-        let inode = metadata.ino();
-        let num_other_links = metadata.nlink();
-
-        // println!("Source file: {:?}", source_file);
-        // println!("Inode: {:?}", inode);
-        // println!("Num other links: {:?}", num_other_links);
-    }
-
-    Ok(())
-}
+// fn stat_source_files(source_files: Vec<&str>) -> Result<(), Box<dyn Error>> {
+//     for source_file in source_files.iter() {
+//         let metadata_result = fs::metadata(source_file);
+//         // if metadata_result.is_err() {
+//         if let Err(err) = metadata_result {
+//             return Err(Box::new(err));
+//         }
+//         let metadata = metadata_result.unwrap();
+//         let inode = metadata.ino();
+//         let num_other_links = metadata.nlink();
+//
+//         // println!("Source file: {:?}", source_file);
+//         // println!("Inode: {:?}", inode);
+//         // println!("Num other links: {:?}", num_other_links);
+//     }
+//
+//     Ok(())
+// }
 
 fn search_and_count(
     search: &str,
@@ -170,6 +167,7 @@ fn replace_with_symlink(source: &str, destination: &str) -> Result<(), std::io::
     symlink(relative_path, destination)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn move_counter(source: SourceCounter, destination: &str) -> Result<(), Box<dyn Error>> {
     let destination_file_path = match fs::metadata(destination) {
         Ok(metadata) => {
@@ -193,8 +191,8 @@ fn move_counter(source: SourceCounter, destination: &str) -> Result<(), Box<dyn 
 
     replace_with_symlink(destination_str, source.path.as_str())?;
 
-    for path in source.paths_other_links.iter() {
-        replace_with_symlink(&destination_str, path.as_str())?;
+    for path in source.paths_other_links {
+        replace_with_symlink(destination_str, path.as_str())?;
     }
 
     Ok(())
@@ -283,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let inode = s.ino();
         // The file itself is also a links, so to find other links, we need to subtract one
         let num_other_links = s.nlink() - 1;
-        let path = path.to_string();
+        let path = (*path).to_string();
 
         // println!("Source file: {:?}. links: {}", path, num_other_links);
 
@@ -317,7 +315,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ensure_dir(destination)?;
     }
 
-    for (_, counter) in updated_counters.into_iter() {
+    for (_, counter) in updated_counters {
         move_counter(counter, destination)?;
     }
 
